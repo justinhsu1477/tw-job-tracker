@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## What This Is
 
-A Claude skill (`/tw-job-hunt`) that automates job searching on **Taiwan job boards**: scrapes job postings from 104人力銀行 (no API key needed), scores them against skills from Notion, saves ranked results to a Notion Job Tracker database, and generates cover letters for user-selected jobs.
+A Claude skill (`/tw-job-hunt`) that automates job searching on **Taiwan job boards**: scrapes job postings from 104人力銀行, CakeResume, and Yourator, scores them against skills from Notion, researches companies via AI, saves ranked results to a Notion Job Tracker database, and supports interview tracking and cover letter generation.
 
 When installed as a skill, scripts run from `~/.claude/skills/tw-job-hunter/scripts/` with the venv at `~/.venv/tw-job-hunter/`.
 
@@ -21,8 +21,10 @@ bash scripts/setup_venv.sh
 PYTHON=~/.venv/tw-job-hunter/bin/python3
 CONFIG=~/.config/tw-job-hunter/config.json
 
-# 1. Search 104
+# 1. Search (single provider or all)
 $PYTHON scripts/run_search.py --config $CONFIG -o /tmp/tw-jobs.json
+$PYTHON scripts/run_search.py --provider all --config $CONFIG -o /tmp/tw-jobs.json
+$PYTHON scripts/run_search.py --provider cakeresume --config $CONFIG -o /tmp/tw-jobs.json
 
 # 2. Score
 $PYTHON scripts/score_jobs.py -i /tmp/tw-jobs.json -o /tmp/tw-scored.json
@@ -31,8 +33,14 @@ $PYTHON scripts/score_jobs.py -i /tmp/tw-jobs.json -o /tmp/tw-scored.json
 $PYTHON scripts/generate_cover_letters.py --jobs /tmp/tw-scored.json --indices "1,3"
 ```
 
+### Run full automated pipeline
+```bash
+bash scripts/daily_tw_job_hunt.sh                # default provider
+bash scripts/daily_tw_job_hunt.sh --provider all  # all providers
+```
+
 ### Dependencies
-`requirements.txt` lists `httpx` and `python-dateutil`. No external API keys required for 104.
+`requirements.txt` lists `httpx` and `python-dateutil`. No external API keys required.
 
 ## Architecture
 
@@ -40,9 +48,10 @@ $PYTHON scripts/generate_cover_letters.py --jobs /tmp/tw-scored.json --indices "
 ```
 Notion（技術能力庫 + 專案經歷庫）
         ↓  MCP → skills_cache.json
-104 API → scraper_104.py → run_search.py → [raw jobs JSON]
-                                    ↓
-                     score_jobs.py（reads skills_cache.json）
+104 API ──────┐
+CakeResume API┼→ run_search.py --provider all → [raw jobs JSON]
+Yourator API──┘        ↓ merge + cross-provider dedup
+                     score_jobs.py（skills + projects + salary normalization）
                                     ↓
                           [scored jobs JSON]
                                     ↓
@@ -50,55 +59,76 @@ Notion（技術能力庫 + 專案經歷庫）
                                     ↓
                      Claude web search → 公司研究（產業/規模/評價/薪資）
                                     ↓  notion-update-page
-                     generate_cover_letters.py → Notion pages
+                     面試追蹤 / generate_cover_letters.py → Notion pages
 ```
 
 ### Module Relationships
 - `scripts/common/` — shared library
   - `config.py` — loads `~/.config/tw-job-hunter/config.json`
-  - `job_scoring.py` — reads Notion skills cache, scores/ranks jobs (0–100) with proficiency weighting
-  - `dedup.py` — URL-based dedup (pass 1), normalized-title dedup (pass 2), supports Chinese titles
-  - `date_utils.py` — date helpers (supports Chinese relative dates like "3天前")
-- `scraper_104.py` — Hits 104.com.tw internal API; no API key needed; search + detail endpoints
-- `run_search.py` — provider-switching CLI (currently: `104`)
-- `score_jobs.py` — CLI wrapper around `common.job_scoring.score_jobs()`
-- `generate_cover_letters.py` — produces Chinese cover letter templates
+  - `job_scoring.py` — proficiency-weighted scoring + project bonus + negative signals
+  - `dedup.py` — URL dedup + title dedup, cross-provider (104 > cakeresume > yourator > 1111)
+  - `date_utils.py` — date helpers (supports Chinese relative dates)
+  - `salary_utils.py` — Taiwan salary parsing & monthly normalization
+- `scraper_104.py` — 104.com.tw internal API scraper (no key needed)
+- `scraper_cakeresume.py` — CakeResume public API scraper
+- `scraper_yourator.py` — Yourator public API scraper
+- `run_search.py` — provider-switching CLI: `104`, `cakeresume`, `yourator`, `all`
+- `score_jobs.py` — CLI wrapper for scoring
+- `generate_cover_letters.py` — Chinese cover letter templates
+- `daily_tw_job_hunt.sh` — Full pipeline shell script (for cron)
 
-### 104 API Details
-- **Search**: `GET https://www.104.com.tw/jobs/search/api/jobs` (needs `Referer` header)
-- **Detail**: `GET https://www.104.com.tw/job/ajax/content/{job_no}` (needs matching `Referer`)
-- Rate limit: 3-second delay between requests
-- Area codes: 台北市=6001001000, 新北市=6001002000, etc.
+### Provider Details
+
+| Provider | API | Key | Rate Limit |
+|----------|-----|-----|------------|
+| 104 | `GET /jobs/search/api/jobs` | None (needs Referer header) | 3s delay |
+| CakeResume | `GET /api/v3/job-listings` | None | 2s delay |
+| Yourator | `GET /api/v2/jobs` | None | 2s delay |
 
 ### Job Schema
-Each job dict has: `title`, `company`, `location`, `description`, `url`, `posted_date`, `salary`, `employment_type`, `experience_level`, `remote` (bool), `source`, `scraped_at`, `id` (MD5 of URL), and after scoring: `match_score` (0–100), `match_reason`.
+Each job dict has: `title`, `company`, `location`, `description`, `url`, `posted_date`, `salary`, `salary_monthly` (normalized), `employment_type`, `experience_level`, `remote` (bool), `source`, `scraped_at`, `id` (MD5 of URL), and after scoring: `match_score` (0–100), `match_reason`.
 
 ### Scoring Logic (`common/job_scoring.py`)
-- Reads skills from `~/.config/tw-job-hunter/skills_cache.json` (written by Claude MCP from Notion)
+- Reads skills + projects from `~/.config/tw-job-hunter/skills_cache.json`
 - Per skill match: 精通 +8, 熟悉 +5, 了解 +3
-- Bonus rules: role alignment (+15), tech stack depth (+10), domain match (+8), remote (+5)
-- Falls back to hardcoded Java/Spring Boot skills if cache not found
+- Project overlap bonus: +5 per project with ≥2 matching techs
+- Expert overlap bonus: +10 if ≥3 精通 skills match
+- Bonus rules: role alignment (+15), tech stack (+10), domain (+8), remote (+5)
+- Negative: internship exclusion (-50), experience mismatch (-10), low salary (-5)
+- Salary normalization: auto-converts annual/hourly to monthly equivalent
 
-### Notion Integration
-- **Input**: 技術能力庫 (skills DB) + 專案經歷庫 (projects DB) → `skills_cache.json`
-- **Output**: Job Tracker DB in Notion (created via MCP `notion-create-database`)
-- MCP tools used: `notion-search`, `notion-fetch`, `notion-query-database-view`, `notion-create-database`, `notion-create-pages`
+### Salary Normalization (`common/salary_utils.py`)
+- Parses: "$40,000–$60,000", "年薪 50萬-80萬", "待遇面議"
+- Annual → monthly: divide by 14 (Taiwan 14-month standard)
+- Hourly → monthly: multiply by 176 (22 days × 8 hours)
+- Filters out 104's $9,999,999 placeholder
 
 ### Company Research (AI-powered, no script)
 - After writing jobs to Notion, Claude uses **web search** to research top-scoring companies
 - Sources: 104 company pages, PTT salary boards, 比薪水, Glassdoor, 面試趣
 - Fills 5 Notion columns: 產業, 公司規模, 公司評價, 薪資參考, 公司簡介
-- Only researches unique companies in the top 10 jobs to limit AI token usage
-- Uses `notion-update-page` to write research back to existing rows
+- Only researches unique companies in the top 10 jobs
+- Uses `notion-update-page` to write research back
+
+### Interview Tracking (Notion-native)
+- Notion DB columns: 面試階段, 面試日期, 面試筆記, 薪資offer, 跟進日期
+- Stages: 未面試 → 電話面試 → 技術面試 → 主管面試 → HR面試 → 已拿offer/已婉拒
+- All managed via Claude MCP `notion-update-page` — no Python code needed
+
+### Notion Integration
+- **Input**: 技術能力庫 + 專案經歷庫 → `skills_cache.json`
+- **Output**: Job Tracker DB with 20+ columns
+- MCP tools: `notion-search`, `notion-fetch`, `notion-query-database-view`, `notion-create-database`, `notion-create-pages`, `notion-update-page`
 
 ### Key Design Decisions
-- **No API key needed**: 104 uses public internal API with Referer header
-- **Notion as single source of truth**: skills come from Notion, results go back to Notion
-- **Skills cache pattern**: Claude reads Notion → writes JSON cache → Python scripts read cache
-- **3-second request delay**: prevents 104 rate limiting
+- **No API key needed**: all three providers use public APIs
+- **Notion as single source of truth**: skills from Notion, results back to Notion
+- **Skills cache pattern**: Claude reads Notion → JSON cache → Python reads cache
+- **Cross-provider dedup**: same job on 104 + CakeResume → kept once (by source rank)
 - **Chinese + English matching**: skill synonyms table supports both languages
+- **Salary auto-normalization**: display comparable monthly figures regardless of format
 
 ## Configuration
 Config file: `~/.config/tw-job-hunter/config.json`
 
-Key fields: `search_provider` (`"104"` default), `notion.skills_db_id`, `notion.projects_db_id`, `notion.job_tracker_db_id`, `user_name`, `search.keywords[]`, `search.location`, `search.area_code`, `search.remote`, `search.time_range`, `search.max_results_per_query`, `scoring.min_score`.
+Key fields: `search_provider` (`"104"` | `"cakeresume"` | `"yourator"` | `"all"`), `notion.skills_db_id`, `notion.projects_db_id`, `notion.job_tracker_db_id`, `user_name`, `search.keywords[]`, `search.location`, `search.area_code`, `search.remote`, `search.time_range`, `search.max_results_per_query`, `scoring.min_score`, `scoring.years_experience` (for mismatch penalty), `scoring.min_monthly_salary` (for salary penalty).

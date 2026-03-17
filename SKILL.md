@@ -1,6 +1,9 @@
 ---
 name: tw-job-hunt
-description: 台灣求職助手 — 搜尋 104 人力銀行職缺，用 Notion 技能庫評分，結果寫回 Notion
+description: |
+  台灣求職助手 — 搜尋 104/CakeResume/Yourator 職缺，用 Notion 技能庫評分，
+  AI 公司研究，結果寫回 Notion，支援面試追蹤。
+  Triggers: /tw-job-hunt, "找工作", "搜尋職缺", "台灣求職"
 user_invocable: true
 ---
 
@@ -48,12 +51,18 @@ If the Notion Job Tracker DB exists (check config `notion.job_tracker_db_id`), a
 
 ## Step 2 — Search Jobs
 
-Run:
+Run with `--provider all` to search all supported job boards:
 ```bash
-$PYTHON $SKILL_DIR/scripts/run_search.py --config $CONFIG -o /tmp/tw-jobs.json
+$PYTHON $SKILL_DIR/scripts/run_search.py --config $CONFIG --provider all -o /tmp/tw-jobs.json
 ```
 
-Report how many jobs were found.
+Supported providers:
+- **104** — 104人力銀行 (Taiwan's largest, no API key)
+- **cakeresume** — CakeResume (tech/startup focused)
+- **yourator** — Yourator (startup/tech jobs)
+- **all** — Run all providers, merge and cross-provider deduplicate
+
+Report how many jobs were found from each provider.
 
 ## Step 3 — Score Jobs
 
@@ -64,25 +73,28 @@ $PYTHON $SKILL_DIR/scripts/score_jobs.py -i /tmp/tw-jobs.json -o /tmp/tw-scored.
 
 Read `/tmp/tw-scored.json` and filter to jobs with `match_score >= min_score` from config (default 60).
 
+Scoring includes:
+- Skill matching with proficiency weighting (精通+8, 熟悉+5, 了解+3)
+- Project experience bonus (+5 per matching project)
+- Role/domain/remote bonuses
+- Negative signals: internship exclusion, experience mismatch penalty
+- Salary normalization (月薪參考 field auto-filled)
+
 ## Step 4 — Create/Update Notion Job Tracker
 
 If `notion.job_tracker_db_id` is empty in config:
 1. Use `notion-create-database` to create a new "🎯 TW Job Tracker" database with these properties:
-   - 職缺名稱 (title)
-   - 公司 (rich_text)
-   - 匹配分數 (number)
-   - 匹配原因 (rich_text)
-   - 薪資 (rich_text)
-   - 地點 (rich_text)
-   - 遠端 (checkbox)
-   - 來源 (select: 104, CakeResume, Yourator)
-   - 連結 (url)
-   - 刊登日期 (date)
+   - 職缺名稱 (title), 公司, 匹配分數 (number), 匹配原因, 薪資, 月薪參考
+   - 地點, 遠端 (checkbox), 來源 (select: 104, CakeResume, Yourator, 1111), 連結 (url)
+   - 刊登日期 (date), 搜尋日期 (date)
    - 狀態 (select: 待看, 有興趣, 已投遞, 不適合)
-   - 搜尋日期 (date)
+   - 產業, 公司規模, 公司評價, 薪資參考, 公司簡介
+   - 面試階段 (select: 未面試, 電話面試, 技術面試, 主管面試, HR面試, 已拿offer, 已婉拒)
+   - 面試日期 (date), 面試筆記, 薪資offer, 跟進日期 (date)
 2. Save the new DB ID to config's `notion.job_tracker_db_id`.
 
 Then use `notion-create-pages` to add each qualifying job as a row in the tracker.
+Include `月薪參考` from scored data's `salary_monthly` field.
 
 ## Step 4.5 — Company Research (AI-powered)
 
@@ -114,15 +126,18 @@ Show the user a summary table:
 ```
 # 🎯 今日職缺搜尋結果 (YYYY-MM-DD)
 
+搜尋來源：104 + CakeResume + Yourator
 找到 N 個匹配職缺（分數 ≥ 60）：
 
-| # | 分數 | 職缺名稱 | 公司 | 薪資 | 產業 | 公司評價 |
-|---|------|---------|------|------|------|---------|
-| 1 | 85   | 後端工程師 | XX公司 | 50K-70K | 金融科技 | PTT正面 |
+| # | 分數 | 職缺名稱 | 公司 | 月薪參考 | 產業 | 來源 |
+|---|------|---------|------|---------|------|------|
+| 1 | 85   | 後端工程師 | XX公司 | 50K-70K | 金融科技 | 104 |
 ...
 
 已寫入 Notion Job Tracker。
-如需產生求職信，請告訴我編號（如："幫我產生 1, 3, 5 的求職信"）。
+- 如需產生求職信：告訴我編號（如："幫我產生 1, 3 的求職信"）
+- 如需更新面試狀態：告訴我（如："我拿到 XX 公司的面試了"）
+- 如需排程自動執行：告訴我（如："幫我排程每天早上10點搜尋"）
 ```
 
 ## Step 6 — Cover Letters (on user request)
@@ -140,10 +155,51 @@ $PYTHON $SKILL_DIR/scripts/generate_cover_letters.py --jobs /tmp/tw-scored.json 
 
 4. Show the user links to the created Notion pages.
 
+## Step 7 — Interview Tracking (on user request)
+
+When the user reports interview progress (e.g. "我拿到XX公司的面試了", "更新面試狀態"):
+
+1. Find the matching job in the Notion Job Tracker DB using `notion-query-database-view`.
+
+2. Ask the user for details (if not provided):
+   - 面試階段: 電話面試/技術面試/主管面試/HR面試/已拿offer/已婉拒
+   - 面試日期: when
+   - 面試筆記: any notes (optional)
+   - 薪資offer: if applicable
+   - 跟進日期: next action date (optional)
+
+3. Use `notion-update-page` to update the job's row:
+   - Set 面試階段 to the reported stage
+   - Set 面試日期
+   - Set 狀態 to "已投遞" (if not already)
+   - Add any notes to 面試筆記
+
+4. Show updated status and a summary of all active interviews:
+
+```
+| 公司 | 職位 | 面試階段 | 面試日期 | 下次跟進 |
+|------|------|---------|---------|---------|
+| XX   | 後端 | 技術面試 | 03/20   | 03/25   |
+```
+
+## Step 8 — Scheduling (on user request)
+
+When the user asks to schedule automatic runs (e.g. "幫我排程", "每天自動搜尋"):
+
+Explain options:
+1. **Claude Scheduled Task** (recommended): Use the `create_scheduled_task` MCP tool to schedule `/tw-job-hunt` to run at specified intervals.
+2. **Cron job** (manual): Set up system cron with `daily_tw_job_hunt.sh` — handles search+score only, Notion write requires Claude.
+
+For option 1, create a scheduled task that:
+- Runs at the user's specified time (default: weekdays 10:00 AM)
+- Invokes `/tw-job-hunt`
+- Skips if today's jobs already exist in the tracker
+
 ## Important Notes
 
 - **Never auto-generate cover letters** — always wait for the user to choose.
 - **104 has no API key** — it just works with the Referer header.
-- **3-second delay** between 104 API requests is built into the scraper.
+- **3-second delay** between 104 API requests, 2-second for CakeResume/Yourator.
 - **Skills cache** is refreshed from Notion every time the skill runs.
 - Always use `ensure_ascii=False` when writing JSON with Chinese text.
+- **Cross-provider dedup** handles same job posted on multiple boards.
