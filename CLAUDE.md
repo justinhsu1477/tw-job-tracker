@@ -48,6 +48,8 @@ Notion（技術能力庫 + 專案經歷庫）
                                     ↓
                      Claude MCP → Notion Job Tracker DB
                                     ↓
+                     Claude web search → 公司研究（產業/規模/評價/薪資）
+                                    ↓  notion-update-page
                      generate_cover_letters.py → Notion pages
 ```
 
@@ -81,6 +83,13 @@ Each job dict has: `title`, `company`, `location`, `description`, `url`, `posted
 - **Input**: 技術能力庫 (skills DB) + 專案經歷庫 (projects DB) → `skills_cache.json`
 - **Output**: Job Tracker DB in Notion (created via MCP `notion-create-database`)
 - MCP tools used: `notion-search`, `notion-fetch`, `notion-query-database-view`, `notion-create-database`, `notion-create-pages`
+
+### Company Research (AI-powered, no script)
+- After writing jobs to Notion, Claude uses **web search** to research top-scoring companies
+- Sources: 104 company pages, PTT salary boards, 比薪水, Glassdoor, 面試趣
+- Fills 5 Notion columns: 產業, 公司規模, 公司評價, 薪資參考, 公司簡介
+- Only researches unique companies in the top 10 jobs to limit AI token usage
+- Uses `notion-update-page` to write research back to existing rows
 
 ### Key Design Decisions
 - **No API key needed**: 104 uses public internal API with Referer header

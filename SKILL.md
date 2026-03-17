@@ -84,6 +84,29 @@ If `notion.job_tracker_db_id` is empty in config:
 
 Then use `notion-create-pages` to add each qualifying job as a row in the tracker.
 
+## Step 4.5 — Company Research (AI-powered)
+
+For the **top 10 scoring jobs**, use web search to research each unique company. This step uses Claude's built-in web search — no Python script needed.
+
+For each unique company, search:
+1. `"{公司名稱}" 104人力銀行 公司介紹` — get industry, size, description
+2. `"{公司名稱}" 薪資 PTT` or `"{公司名稱}" 面試 Glassdoor` — get salary references and reviews
+
+Extract and fill these fields:
+- **產業**: e.g. "金融科技", "電子商務", "SaaS", "遊戲"
+- **公司規模**: e.g. "50-200人", "上市公司", "新創"
+- **公司評價**: Brief summary from PTT/Glassdoor/面試趣, e.g. "PTT 評價正面，工作氛圍佳；Glassdoor 4.2/5"
+- **薪資參考**: Market data from 比薪水/PTT/Glassdoor, e.g. "後端工程師約 60K-80K (比薪水)"
+- **公司簡介**: 1-2 sentence description of what the company does
+
+Then use `notion-update-page` to update each job's row in the tracker with the research results.
+
+**Important notes:**
+- Research unique companies only (don't repeat for same company with multiple jobs)
+- If no reliable info found, leave the field empty rather than guessing
+- Keep descriptions concise — this is for quick reference, not deep research
+- Prefer Traditional Chinese sources (PTT, 比薪水, 面試趣) over English ones
+
 ## Step 5 — Present Results
 
 Show the user a summary table:
@@ -93,9 +116,9 @@ Show the user a summary table:
 
 找到 N 個匹配職缺（分數 ≥ 60）：
 
-| # | 分數 | 職缺名稱 | 公司 | 薪資 | 地點 |
-|---|------|---------|------|------|------|
-| 1 | 85   | 後端工程師 | XX公司 | 50K-70K | 台北市 |
+| # | 分數 | 職缺名稱 | 公司 | 薪資 | 產業 | 公司評價 |
+|---|------|---------|------|------|------|---------|
+| 1 | 85   | 後端工程師 | XX公司 | 50K-70K | 金融科技 | PTT正面 |
 ...
 
 已寫入 Notion Job Tracker。

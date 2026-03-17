@@ -9,6 +9,7 @@
 - **熟練度加權評分** — 精通(+8)、熟悉(+5)、了解(+3)，不只是關鍵字匹配
 - **中英文雙語匹配** — 技能同義詞表支援中英文（如 "微服務" = "microservice"）
 - **Claude Skill** — 一鍵 `/tw-job-hunt` 完成搜尋→評分→存入 Notion 全流程
+- **AI 公司研究** — 自動搜尋公司產業、規模、評價、薪資參考（PTT/比薪水/Glassdoor）
 
 ## 快速開始
 
@@ -45,7 +46,8 @@ $PYTHON scripts/generate_cover_letters.py --jobs /tmp/tw-scored.json --indices "
 2. 搜尋 104 人力銀行職缺
 3. 用你的技能評分排序
 4. 寫入 Notion Job Tracker Database
-5. 等你選擇後產生求職信
+5. **AI 公司研究** — 搜尋產業、規模、PTT/Glassdoor 評價、薪資參考
+6. 等你選擇後產生求職信
 
 ## 架構
 
@@ -59,6 +61,8 @@ Notion（技術能力庫 + 專案經歷庫）
                           [scored jobs JSON]
                                     ↓
                      Claude MCP → Notion Job Tracker DB
+                                    ↓
+                     Claude web search → 公司研究（產業/規模/評價/薪資）
 ```
 
 ## 支援的求職網站
