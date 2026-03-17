@@ -53,7 +53,9 @@ CakeResume API┼→ run_search.py --provider all → [raw jobs JSON]
 Yourator API──┘        ↓ merge + cross-provider dedup
                      score_jobs.py（skills + projects + salary normalization）
                                     ↓
-                          [scored jobs JSON]
+                          [scored jobs JSON — keyword score]
+                                    ↓
+                     Claude LLM → 語意重排 top 15（final = 40% keyword + 60% semantic）
                                     ↓
                      Claude MCP → Notion Job Tracker DB
                                     ↓
@@ -96,6 +98,14 @@ Each job dict has: `title`, `company`, `location`, `description`, `url`, `posted
 - Bonus rules: role alignment (+15), tech stack (+10), domain (+8), remote (+5)
 - Negative: internship exclusion (-50), experience mismatch (-10), low salary (-5)
 - Salary normalization: auto-converts annual/hourly to monthly equivalent
+
+### LLM Semantic Re-ranking (Step 3.5, no script)
+- After keyword scoring, Claude takes top 15 jobs and does semantic matching
+- Compares job descriptions against user's skills + projects using language understanding
+- Catches non-obvious matches: "跨部門協作" ≈ "專案管理", "系統設計" ≈ "架構經驗"
+- Final score = keyword_score × 0.4 + semantic_score × 0.6
+- Transparent: match_reason shows both scores (e.g. "關鍵字:35 + 語意:78 → 最終:61")
+- Cost: ~$0.01-0.03 per run (processes all 15 in one pass)
 
 ### Salary Normalization (`common/salary_utils.py`)
 - Parses: "$40,000–$60,000", "年薪 50萬-80萬", "待遇面議"

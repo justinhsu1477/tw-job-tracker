@@ -80,6 +80,46 @@ Scoring includes:
 - Negative signals: internship exclusion, experience mismatch penalty
 - Salary normalization (月薪參考 field auto-filled)
 
+## Step 3.5 — LLM Semantic Re-ranking (AI-powered)
+
+After keyword scoring, take the **top 15 jobs** (by match_score) and perform semantic matching using your own LLM capabilities. This catches non-obvious matches that keyword-based scoring misses.
+
+### How to do it
+
+For each of the top 15 jobs, read the job's `title` + `description` and compare against the user's skills and projects from `$CACHE`. Then re-score each job on a 0-100 scale.
+
+Use this evaluation prompt internally (do NOT show to user):
+
+```
+Given this candidate profile:
+- Skills: {list skills with proficiency from cache}
+- Projects: {list projects with techs from cache}
+
+And this job posting:
+- Title: {title}
+- Description: {first 500 chars of description}
+
+Rate the match from 0-100 considering:
+1. Direct skill matches (already scored by keyword — weight 40%)
+2. Semantic skill relevance: skills the candidate has that are related to job requirements but not exact keyword matches (e.g. "跨部門協作" ≈ "專案管理", "系統設計" ≈ "架構經驗") — weight 30%
+3. Project experience alignment: does the candidate's project background fit this role? — weight 20%
+4. Growth potential: can the candidate reasonably grow into this role? — weight 10%
+
+Output ONLY: score (integer), one-line reason in Traditional Chinese.
+```
+
+### Merge scores
+
+Combine the keyword score and semantic score:
+- **Final score** = `keyword_score * 0.4 + semantic_score * 0.6`
+- Update each job's `match_score` and append semantic reason to `match_reason`
+- Re-sort the top 15 by final score
+
+### Important notes
+- Process all 15 jobs in a single evaluation pass (not one API call per job) to save tokens
+- If a job had keyword_score = 20 but semantic_score = 75, the final score rises significantly — this is the key value of semantic matching
+- Keep the original keyword score in `match_reason` for transparency: e.g. "關鍵字:35 + 語意:78 → 最終:61；語意匹配：具備相關微服務與API設計經驗"
+
 ## Step 4 — Create/Update Notion Job Tracker
 
 If `notion.job_tracker_db_id` is empty in config:
