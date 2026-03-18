@@ -131,6 +131,7 @@ If `notion.job_tracker_db_id` is empty in config:
    - 產業, 公司規模, 公司評價, 薪資參考, 公司簡介
    - 面試階段 (select: 未面試, 電話面試, 技術面試, 主管面試, HR面試, 已拿offer, 已婉拒)
    - 面試日期 (date), 面試筆記, 薪資offer, 跟進日期 (date)
+   - 新增時間 (created_time) — 自動記錄程式新增的時間，方便排序
 2. Save the new DB ID to config's `notion.job_tracker_db_id`.
 
 Then use `notion-create-pages` to add each qualifying job as a row in the tracker.

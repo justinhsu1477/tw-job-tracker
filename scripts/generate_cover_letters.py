@@ -17,6 +17,25 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from common.config import load_config, get_user_info
+from common.job_scoring import load_skills_cache, _get_search_terms
+
+SKILLS_CACHE_PATH = "~/.config/tw-job-hunter/skills_cache.json"
+
+
+def _find_matching_skills(job: dict, skills: list[dict]) -> list[str]:
+    """Find skills from cache that match the job description."""
+    text = (
+        job.get("title", "") + " " +
+        job.get("description", "")
+    ).lower()
+    matched = []
+    for skill in skills:
+        name = skill.get("name", "")
+        prof = skill.get("proficiency", "")
+        terms = _get_search_terms(name)
+        if any(t in text for t in terms):
+            matched.append(f"{name}（{prof}）")
+    return matched[:6]
 
 
 def clean_description(text: str) -> str:
@@ -46,6 +65,25 @@ def generate_cover_letter(job: dict, config: dict) -> str:
 
     user_info = get_user_info(config)
     user_name = user_info["name"] or "您的姓名"
+    years_exp = config.get("scoring", {}).get("years_experience", 2)
+
+    # Find matching skills from cache
+    skills, projects = load_skills_cache()
+    matched_skills = _find_matching_skills(job, skills)
+    skills_text = "\n".join(f"- {s}" for s in matched_skills) if matched_skills else "- [與職位相關的關鍵技能]"
+
+    # Find matching projects
+    matched_projects = []
+    for proj in projects:
+        techs = proj.get("techs", [])
+        text_lower = (job.get("title", "") + " " + job.get("description", "")).lower()
+        match_count = sum(1 for t in techs if any(term in text_lower for term in _get_search_terms(t)))
+        if match_count >= 2:
+            matched_projects.append(f"{proj['name']}（使用 {', '.join(techs[:4])}）")
+
+    projects_text = ""
+    if matched_projects:
+        projects_text = "\n\n相關專案經歷：\n" + "\n".join(f"- {p}" for p in matched_projects[:3])
 
     cover_letter = f"""# 求職信 - {company}
 
@@ -61,16 +99,13 @@ def generate_cover_letter(job: dict, config: dict) -> str:
 
 {company} 人資團隊您好，
 
-我是 {user_name}，對貴公司的 {title} 職位深感興趣。我擁有 [年資] 年的 [領域] 開發經驗，相信我的技術背景與貴公司的需求高度契合。
+我是 {user_name}，對貴公司的 {title} 職位深感興趣。我擁有 {years_exp} 年以上的軟體開發經驗，相信我的技術背景與貴公司的需求高度契合。
 
 [描述您目前的角色和最相關的經驗。強調與此職位直接相關的專案或成就。]
 
 我的技術背景包括：
 
-- [與職位相關的關鍵技能 1]
-- [與職位相關的關鍵技能 2]
-- [與職位相關的關鍵技能 3]
-- [與職位相關的關鍵技能 4]
+{skills_text}{projects_text}
 
 我特別被 {company} 吸引，是因為 [與公司使命、產品或文化相關的具體原因]。期待有機會將我的技術能力帶入貴公司的團隊。
 
