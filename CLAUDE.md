@@ -84,8 +84,8 @@ Yourator API──┘        ↓ merge + cross-provider dedup
 | Provider | API | Key | Rate Limit |
 |----------|-----|-----|------------|
 | 104 | `GET /jobs/search/api/jobs` | None (needs Referer header) | 3s delay |
-| CakeResume | `GET /api/v3/job-listings` | None | 2s delay |
-| Yourator | `GET /api/v2/jobs` | None | 2s delay |
+| Cake (CakeResume) | Next.js `_next/data` (cake.me) | None (needs buildId) | 2s delay |
+| Yourator | `GET /api/v4/jobs` | None | 2s delay |
 
 ### Job Schema
 Each job dict has: `title`, `company`, `location`, `description`, `url`, `posted_date`, `salary`, `salary_monthly` (normalized), `employment_type`, `experience_level`, `remote` (bool), `source`, `scraped_at`, `id` (MD5 of URL), and after scoring: `match_score` (0–100), `match_reason`.
@@ -127,7 +127,7 @@ Each job dict has: `title`, `company`, `location`, `description`, `url`, `posted
 
 ### Notion Integration
 - **Input**: 技術能力庫 + 專案經歷庫 → `skills_cache.json`
-- **Output**: Job Tracker DB with 20+ columns
+- **Output**: Job Tracker DB with 20+ columns (includes `新增時間` created_time for tracking insertion order)
 - MCP tools: `notion-search`, `notion-fetch`, `notion-query-database-view`, `notion-create-database`, `notion-create-pages`, `notion-update-page`
 
 ### Key Design Decisions

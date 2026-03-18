@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common.config import load_config
 from common.dedup import deduplicate_jobs, filter_seen_jobs, generate_job_id
 
-SEARCH_URL = "https://www.yourator.co/api/v2/jobs"
+SEARCH_URL = "https://www.yourator.co/api/v4/jobs"
 BASE_URL = "https://www.yourator.co"
 
 REQUEST_DELAY = 2  # seconds between requests
@@ -64,8 +64,8 @@ def normalize_yourator_job(job: dict) -> dict:
     company_data = job.get("company", {}) or {}
     company = company_data.get("brand", "") or company_data.get("name", "") or ""
 
-    # Location
-    location = job.get("city", "") or ""
+    # Location - v4 returns "location" directly
+    location = job.get("location", "") or job.get("city", "") or ""
     if not location:
         area = job.get("area", "")
         location = area if isinstance(area, str) else ""
@@ -79,11 +79,14 @@ def normalize_yourator_job(job: dict) -> dict:
     if not job_url and job.get("id"):
         job_url = f"{BASE_URL}/companies/{company_data.get('path', '')}/jobs/{job['id']}"
 
-    # Salary
+    # Salary - v4 returns "salary" as display string (e.g. "面議（經常性薪資達4萬元）")
+    salary_str = job.get("salary", "") or ""
     salary_min = job.get("salary_min") or job.get("min_salary") or 0
     salary_max = job.get("salary_max") or job.get("max_salary") or 0
     salary_type = job.get("salary_type", "monthly")
-    if salary_min and salary_max:
+    if salary_str:
+        salary_desc = salary_str
+    elif salary_min and salary_max:
         salary_desc = f"${salary_min:,}–${salary_max:,}"
     elif salary_min:
         salary_desc = f"${salary_min:,}+"
@@ -186,12 +189,15 @@ def search_yourator(
             return [], 0
 
         result = resp.json()
-        # Yourator returns { "jobs": [...], "total": N }
-        # or { "data": [...], "meta": {...} }
-        jobs = result.get("jobs") or result.get("data") or []
+        # v4 API wraps in "payload": { "jobs": [...], "hasMore": bool, ... }
+        payload = result.get("payload", result)
+        jobs = payload.get("jobs") or payload.get("data") or []
         if not isinstance(jobs, list):
             jobs = []
-        total = result.get("total") or result.get("meta", {}).get("total", len(jobs))
+        total = payload.get("total", len(jobs))
+        has_more = payload.get("hasMore", False)
+        if not total and has_more:
+            total = len(jobs) + 1  # signal there are more
         return jobs[:max_results], total
     except Exception as e:
         print(f"  Yourator request error: {e}", file=sys.stderr)

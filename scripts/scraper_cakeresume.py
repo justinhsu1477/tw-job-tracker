@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 """
-CakeResume Job Scraper - Searches jobs via CakeResume's public API.
+Cake (formerly CakeResume) Job Scraper - Scrapes jobs from cake.me.
 
-CakeResume is Taiwan's second-largest tech job board, popular among
-startups and international companies.
+Cake rebranded from CakeResume in mid-2024 and migrated to cake.me.
+The old JSON API is gone. This scraper uses the Next.js _next/data
+endpoint which returns structured job data as JSON.
 
 Usage:
     python scraper_cakeresume.py --config ~/.config/tw-job-hunter/config.json
@@ -18,6 +19,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 
@@ -26,8 +28,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common.config import load_config
 from common.dedup import deduplicate_jobs, filter_seen_jobs, generate_job_id
 
-SEARCH_URL = "https://www.cakeresume.com/api/v3/job-listings"
-BASE_URL = "https://www.cakeresume.com"
+BASE_URL = "https://www.cake.me"
+JOBS_PAGE_URL = "https://www.cake.me/jobs"
 
 REQUEST_DELAY = 2  # seconds between requests
 
@@ -39,85 +41,123 @@ def _build_headers() -> dict:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json",
-        "Referer": "https://www.cakeresume.com/jobs",
+        "Accept": "application/json, text/html, */*",
+        "Referer": "https://www.cake.me/jobs",
     }
 
 
+def _get_build_id(client: httpx.Client) -> str | None:
+    """Fetch the Next.js buildId from the main page."""
+    try:
+        resp = client.get(JOBS_PAGE_URL, headers=_build_headers(), follow_redirects=True)
+        m = re.search(r'"buildId"\s*:\s*"([^"]+)"', resp.text)
+        if m:
+            return m.group(1)
+    except Exception as e:
+        print(f"  Failed to get Cake buildId: {e}", file=sys.stderr)
+    return None
+
+
 def _map_location(location: str) -> str:
-    """Map location to CakeResume's location filter."""
+    """Map location to Cake's location filter parameter."""
     location_map = {
-        "台北市": "Taipei, Taiwan",
-        "新北市": "New Taipei City, Taiwan",
-        "桃園市": "Taoyuan, Taiwan",
-        "新竹市": "Hsinchu, Taiwan",
-        "台中市": "Taichung, Taiwan",
-        "台南市": "Tainan, Taiwan",
-        "高雄市": "Kaohsiung, Taiwan",
+        "台北市": "Taiwan",
+        "新北市": "Taiwan",
+        "桃園市": "Taiwan",
+        "新竹市": "Taiwan",
+        "台中市": "Taiwan",
+        "台南市": "Taiwan",
+        "高雄市": "Taiwan",
     }
     return location_map.get(location, location)
 
 
 def normalize_cakeresume_job(job: dict) -> dict:
-    """Normalize a CakeResume job listing to common schema."""
+    """Normalize a Cake job listing to common schema."""
     title = job.get("title", "") or ""
-    company_data = job.get("company", {}) or {}
-    company = company_data.get("name", "") or ""
+    # Strip highlight <mark> tags
+    title = re.sub(r"</?mark>", "", title)
+
+    page_data = job.get("page", {}) or {}
+    company = page_data.get("name", "") or ""
+    company = re.sub(r"</?mark>", "", company)
 
     # Location
-    location = job.get("flat_city", "") or ""
-    if not location:
-        loc_list = job.get("location_list", [])
-        if loc_list:
-            location = loc_list[0] if isinstance(loc_list[0], str) else str(loc_list[0])
+    locations = job.get("locations", []) or []
+    if locations:
+        location = locations[0] if isinstance(locations[0], str) else str(locations[0])
+    else:
+        location = ""
 
     # URL
-    page_path = job.get("page_path", "") or job.get("path", "")
-    if page_path:
-        job_url = f"{BASE_URL}/companies/{company_data.get('path', '')}/jobs/{page_path}"
+    path = job.get("path", "")
+    company_path = page_data.get("path", "")
+    if path and company_path:
+        job_url = f"{BASE_URL}/companies/{company_path}/jobs/{path}"
+    elif path:
+        job_url = f"{BASE_URL}/jobs/{path}"
     else:
-        job_url = job.get("page_url", "") or ""
-    if not job_url and job.get("id"):
-        job_url = f"{BASE_URL}/jobs/{job['id']}"
+        job_url = ""
 
     # Salary
-    salary_min = job.get("salary_min") or 0
-    salary_max = job.get("salary_max") or 0
-    salary_type = job.get("salary_type", "monthly")
+    salary_data = job.get("salary", {}) or {}
+    salary_min = int(float(salary_data.get("min", 0) or 0))
+    salary_max = int(float(salary_data.get("max", 0) or 0))
+    salary_type_raw = salary_data.get("type", "per_month")
+    currency = salary_data.get("currency", "TWD")
+
+    # Map Cake salary types to our schema
+    if "year" in salary_type_raw:
+        salary_type = "yearly"
+    elif "hour" in salary_type_raw:
+        salary_type = "hourly"
+    else:
+        salary_type = "monthly"
+
     if salary_min and salary_max:
         salary_desc = f"${salary_min:,}–${salary_max:,}"
         if salary_type == "yearly":
             salary_desc += " /年"
+        elif salary_type == "hourly":
+            salary_desc += " /時"
     elif salary_min:
         salary_desc = f"${salary_min:,}+"
     else:
         salary_desc = "待遇面議"
 
-    # Posted date
-    created_at = job.get("created_at", "") or job.get("published_at", "")
-    posted_date = ""
-    if created_at:
-        try:
-            if isinstance(created_at, (int, float)):
-                posted_date = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d")
-            else:
-                posted_date = created_at[:10]
-        except Exception:
-            posted_date = str(created_at)[:10]
+    # Posted/updated date
+    content_updated = job.get("contentUpdatedAt", "") or ""
+    posted_date = content_updated[:10] if content_updated else ""
 
     # Remote
-    remote = job.get("remote", False)
-    if not remote:
-        remote = any(kw in title.lower() for kw in ["遠端", "remote", "wfh"])
+    remote = False
+    job_type = job.get("jobType", "") or ""
+    if "remote" in job_type.lower() or any(
+        kw in title.lower() for kw in ["遠端", "remote", "wfh"]
+    ):
+        remote = True
 
     # Description
-    description = job.get("description_plain", "") or job.get("description", "") or ""
-    # Strip HTML tags if present
+    description = job.get("description", "") or ""
     description = re.sub(r"<[^>]+>", " ", description).strip()
 
+    # Tags
+    tags = job.get("tags", []) or []
+    if tags:
+        description += "\n\n技能標籤：" + "、".join(tags)
+
     # Experience
-    exp_min = job.get("experience_min")
-    exp_desc = f"{exp_min}年以上" if exp_min else "不拘"
+    min_exp = job.get("minWorkExpYear")
+    exp_desc = f"{min_exp}年以上" if min_exp else "不拘"
+
+    # Employment type
+    emp_type_map = {
+        "full_time": "全職",
+        "part_time": "兼職",
+        "contract": "約聘",
+        "internship": "實習",
+    }
+    employment_type = emp_type_map.get(job_type, "全職")
 
     result = {
         "title": title,
@@ -130,7 +170,7 @@ def normalize_cakeresume_job(job: dict) -> dict:
         "salary_min": salary_min,
         "salary_max": salary_max,
         "salary_type": salary_type,
-        "employment_type": job.get("job_type", "全職"),
+        "employment_type": employment_type,
         "experience_level": exp_desc,
         "remote": remote,
         "source": "cakeresume",
@@ -142,20 +182,21 @@ def normalize_cakeresume_job(job: dict) -> dict:
 
 def search_cakeresume(
     keyword: str,
+    build_id: str,
     location: str = "",
     page: int = 1,
     max_results: int = 20,
     client: httpx.Client | None = None,
 ) -> tuple[list[dict], int]:
-    """Search CakeResume for jobs. Returns (jobs, total_count)."""
-    params = {
-        "q": keyword,
-        "page": str(page),
-        "per_page": str(min(max_results, 25)),
-        "order": "latest",
-    }
-    if location:
-        params["location"] = _map_location(location)
+    """Search Cake for jobs via _next/data endpoint. Returns (jobs, total_count)."""
+    encoded_kw = quote(keyword, safe="")
+    url = f"{BASE_URL}/_next/data/{build_id}/zh-TW/jobs/{encoded_kw}.json"
+
+    params = {"keyword": keyword}
+    if page > 1:
+        params["page"] = str(page)
+    # Note: cake.me _next/data endpoint does not support location_list params.
+    # The zh-TW locale already filters to Taiwan region by default.
 
     headers = _build_headers()
 
@@ -164,26 +205,29 @@ def search_cakeresume(
         client = httpx.Client(timeout=30)
 
     try:
-        resp = client.get(SEARCH_URL, headers=headers, params=params, follow_redirects=True)
+        resp = client.get(url, headers=headers, params=params, follow_redirects=True)
         if resp.status_code != 200:
-            print(f"  CakeResume API error {resp.status_code}", file=sys.stderr)
+            print(f"  Cake API error {resp.status_code}", file=sys.stderr)
             return [], 0
 
         ct = resp.headers.get("content-type", "")
         if "json" not in ct:
-            print(f"  CakeResume returned non-JSON (content-type: {ct})", file=sys.stderr)
+            print(f"  Cake returned non-JSON (content-type: {ct})", file=sys.stderr)
             return [], 0
 
-        result = resp.json()
-        # CakeResume API may return { "job_listings": [...], "total_count": N }
-        # or { "data": [...], "meta": { "total": N } }
-        jobs = result.get("job_listings") or result.get("data") or []
-        if not isinstance(jobs, list):
-            jobs = []
-        total = result.get("total_count") or result.get("meta", {}).get("total", len(jobs))
+        data = resp.json()
+        page_props = data.get("pageProps", {})
+        initial_state = page_props.get("initialState", {})
+        job_search = initial_state.get("jobSearch", {})
+
+        # Jobs are stored as a dict keyed by path ID
+        entities = job_search.get("entityByPathId", {})
+        jobs = list(entities.values())
+
+        total = len(jobs)
         return jobs[:max_results], total
     except Exception as e:
-        print(f"  CakeResume request error: {e}", file=sys.stderr)
+        print(f"  Cake request error: {e}", file=sys.stderr)
         return [], 0
     finally:
         if own_client:
@@ -196,20 +240,29 @@ def scrape_jobs(
     location: str | None = None,
     skip_seen: bool = True,
 ) -> list[dict]:
-    """Search CakeResume for each keyword, aggregate and deduplicate."""
+    """Search Cake for each keyword, aggregate and deduplicate."""
     search_config = config.get("search", {})
     keywords_list = keywords or search_config.get("keywords", [])
     loc = location or search_config.get("location", "")
     max_results = search_config.get("max_results_per_query", 20)
 
-    print(f"Provider: CakeResume | Location: {loc} | Keywords: {len(keywords_list)}")
+    print(f"Provider: Cake (CakeResume) | Location: {loc} | Keywords: {len(keywords_list)}")
 
     all_jobs = []
     with httpx.Client(timeout=30) as client:
+        # Get the Next.js build ID first
+        build_id = _get_build_id(client)
+        if not build_id:
+            print("  ERROR: Could not get Cake buildId, skipping", file=sys.stderr)
+            return []
+
+        print(f"  Build ID: {build_id[:12]}...")
+
         for kw in keywords_list:
             print(f"Searching: {kw}")
             raw_jobs, total = search_cakeresume(
                 keyword=kw,
+                build_id=build_id,
                 location=loc,
                 max_results=max_results,
                 client=client,
@@ -233,7 +286,8 @@ def scrape_jobs(
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Search jobs on CakeResume")
+
+    parser = argparse.ArgumentParser(description="Search jobs on Cake (CakeResume)")
     parser.add_argument("--config", default="~/.config/tw-job-hunter/config.json")
     parser.add_argument("--keywords", nargs="+")
     parser.add_argument("--location")
